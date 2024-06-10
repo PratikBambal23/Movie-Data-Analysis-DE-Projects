@@ -1,0 +1,82 @@
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.dynamicframe import DynamicFrameCollection
+from awsgluedq.transforms import EvaluateDataQuality
+import concurrent.futures
+import re
+
+class GroupFilter:
+      def __init__(self, name, filters):
+        self.name = name
+        self.filters = filters
+
+def apply_group_filter(source_DyF, group):
+    return(Filter.apply(frame = source_DyF, f = group.filters))
+
+def threadedRoute(glue_ctx, source_DyF, group_filters) -> DynamicFrameCollection:
+    dynamic_frames = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_filter = {executor.submit(apply_group_filter, source_DyF, gf): gf for gf in group_filters}
+        for future in concurrent.futures.as_completed(future_to_filter):
+            gf = future_to_filter[future]
+            if future.exception() is not None:
+                print('%r generated an exception: %s' % (gf, future.exception()))
+            else:
+                dynamic_frames[gf.name] = future.result()
+    return DynamicFrameCollection(dynamic_frames, glue_ctx)
+
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# Script generated for node Reading_from_s3
+Reading_from_s3_node1718033405275 = glueContext.create_dynamic_frame.from_catalog(database="movie-data-analysis", table_name="mda-s3-source-input_data", transformation_ctx="Reading_from_s3_node1718033405275")
+
+# Script generated for node Evaluate Data Quality
+EvaluateDataQuality_node1718033447001_ruleset = """
+    # Example rules: Completeness "colA" between 0.4 and 0.8, ColumnCount > 10
+    Rules = [
+        IsComplete "imdb_rating",
+        ColumnValues "imdb_rating" between 8.5 and 10.3
+    ]
+"""
+
+EvaluateDataQuality_node1718033447001 = EvaluateDataQuality().process_rows(frame=Reading_from_s3_node1718033405275, ruleset=EvaluateDataQuality_node1718033447001_ruleset, publishing_options={"dataQualityEvaluationContext": "EvaluateDataQuality_node1718033447001", "enableDataQualityCloudWatchMetrics": True, "enableDataQualityResultsPublishing": True}, additional_options={"observations.scope":"ALL","performanceTuning.caching":"CACHE_NOTHING"})
+
+# Script generated for node ruleOutcomes
+ruleOutcomes_node1718034864143 = SelectFromCollection.apply(dfc=EvaluateDataQuality_node1718033447001, key="ruleOutcomes", transformation_ctx="ruleOutcomes_node1718034864143")
+
+# Script generated for node rowLevelOutcomes
+rowLevelOutcomes_node1718034766930 = SelectFromCollection.apply(dfc=EvaluateDataQuality_node1718033447001, key="rowLevelOutcomes", transformation_ctx="rowLevelOutcomes_node1718034766930")
+
+# Script generated for node Conditional Router
+ConditionalRouter_node1718035300701 = threadedRoute(glueContext,
+  source_DyF = rowLevelOutcomes_node1718034766930,
+  group_filters = [GroupFilter(name = "Falied_records", filters = lambda row: (bool(re.match("Failed", row["DataQualityEvaluationResult"])))), GroupFilter(name = "default_group", filters = lambda row: (not(bool(re.match("Failed", row["DataQualityEvaluationResult"])))))])
+
+# Script generated for node Falied_records
+Falied_records_node1718035301131 = SelectFromCollection.apply(dfc=ConditionalRouter_node1718035300701, key="Falied_records", transformation_ctx="Falied_records_node1718035301131")
+
+# Script generated for node default_group
+default_group_node1718035301067 = SelectFromCollection.apply(dfc=ConditionalRouter_node1718035300701, key="default_group", transformation_ctx="default_group_node1718035301067")
+
+# Script generated for node aligning_the_schema_between_s3_and_redshift
+aligning_the_schema_between_s3_and_redshift_node1718035994530 = ApplyMapping.apply(frame=default_group_node1718035301067, mappings=[("poster_link", "string", "poster_link", "string"), ("series_title", "string", "series_title", "string"), ("released_year", "string", "released_year", "string"), ("certificate", "string", "certificate", "string"), ("runtime", "string", "runtime", "string"), ("genre", "string", "genre", "string"), ("imdb_rating", "double", "imdb_rating", "double"), ("overview", "string", "overview", "string"), ("meta_score", "long", "meta_score", "long"), ("director", "string", "director", "string"), ("star1", "string", "star1", "string"), ("star2", "string", "star2", "string"), ("star3", "string", "star3", "string"), ("star4", "string", "star4", "string"), ("no_of_votes", "long", "no_of_votes", "long"), ("gross", "string", "gross", "string")], transformation_ctx="aligning_the_schema_between_s3_and_redshift_node1718035994530")
+
+# Script generated for node Amazon S3
+AmazonS3_node1718035245826 = glueContext.write_dynamic_frame.from_options(frame=ruleOutcomes_node1718034864143, connection_type="s3", format="json", connection_options={"path": "s3://gds-projects/Project1-Movie-Data-Analysis/rule-outcome/", "partitionKeys": []}, transformation_ctx="AmazonS3_node1718035245826")
+
+# Script generated for node Amazon S3
+AmazonS3_node1718035383386 = glueContext.write_dynamic_frame.from_options(frame=Falied_records_node1718035301131, connection_type="s3", format="json", connection_options={"path": "s3://gds-projects/Project1-Movie-Data-Analysis/bad_records/", "partitionKeys": []}, transformation_ctx="AmazonS3_node1718035383386")
+
+# Script generated for node loading_to_redshift_table
+loading_to_redshift_table_node1718036656924 = glueContext.write_dynamic_frame.from_catalog(frame=aligning_the_schema_between_s3_and_redshift_node1718035994530, database="movie-data-analysis", table_name="mda-target-redshift-dev_movie_data_imdb_movies_rating", redshift_tmp_dir="s3://gds-temp-files",additional_options={"aws_iam_role": "arn:aws:iam::992382490425:role/redshift-role"}, transformation_ctx="loading_to_redshift_table_node1718036656924")
+
+job.commit()
